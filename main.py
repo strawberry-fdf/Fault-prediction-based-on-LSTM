@@ -1,108 +1,174 @@
-import time
-import warnings
+import os
 import numpy as np
 import time
-import matplotlib.pyplot as plt
-from numpy import newaxis
 import pandas as pd
 import keras
+from matplotlib import pyplot
+from sklearn.preprocessing import OneHotEncoder
 from keras.models import Sequential
 from keras.layers import Bidirectional, LSTM
 from keras.layers.core import Dense, Activation, Dropout
 
-path = './data.csv'
-
-df = pd.read_csv('./data.csv')
-
-
-# print(df.shape)
+'''
+    对labels进行one-hot编码
+'''
 
 
-def load_data(filename, seq_len, normalise_window):
-    data = open(filename, "rb").readlines()
+def label2hot(labels):
+    values = np.array(labels)
+    onehot_encoder = OneHotEncoder(sparse=False)
+    integer_encoded = values.reshape(len(values), 1)
+    onehot_encoded = onehot_encoder.fit_transform(integer_encoded)
+    return onehot_encoded
+
+
+'''
+    处理训练数据
+'''
+
+
+def load_data(path1, path2, label1, label2):
     result = []
+    files1 = os.listdir(path1)
+    files2 = os.listdir(path2)
 
-    sequence_length = seq_len + 2
+    for f1 in files1:
+        data = pd.read_csv(path1 + '/' + f1)
+        # 标签先给每一个戳都打上，最后在降维，降维成每个段一个标签
+        data['labels'] = label1
+        if 'TimeS' in data:
+            data = data.drop(['TimeS'], axis=1)
+        result.append(data)
 
-    for index in range(len(data) - sequence_length):
-        result.append(data[index: index + sequence_length])
-    # print(data)
-    re = np.array(result).astype('float32')
-    ro = int(round(0.9 * len(result)))
+    for f2 in files2:
+        data = pd.read_csv(path2 + '/' + f2)
+        data['labels'] = label2
+        if 'TimeS' in data:
+            data = data.drop(['TimeS'], axis=1)
+        result.append(data)
 
-    # window是最终的测试结果的真实值
-    window = re[ro:, :1]
-    if normalise_window:
-        result = normalise_windows(result)
     result = np.array(result)
-    # 划分train、test
-    row = round(0.9 * result.shape[0])
+    # 打乱顺序
+    np.random.shuffle(result)
+    row = round(0.8 * result.shape[0])
     row = int(row)
+    # 通过均值降维
+    label = result[:, :, -1:]
+    label = label[:, :, :].mean(axis=2)
+    label = label[:, :].mean(axis=1)
+    label = label2hot(label)
+    train = result[0:row, ::]
 
-    train = result[:row, :]
-    np.random.shuffle(train)
-    x_train = train[:, :-1]
-    y_train = train[:, -1:]
-    x_test = result[row:, :-1]
-    y_test = result[row:, -1:]
+    x_train = train[:, :, :-1]
+    y_train = label[0:row, :]
 
-    x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
-    x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
-    return [x_train, y_train, x_test, y_test, window]
+    x_test = result[row:, :, :-1]
+    y_test = label[row:, :]
 
-
-# 将输入结果进行归一化
-def normalise_windows(window_data):
-    normalised_data = []
-    for window in window_data:  # window shape (sequence_length L ,)  即(51L,)
-        normalised_window = [((float(p) / float(window[0])) - 1) for p in window]
-        normalised_data.append(normalised_window)
-    return normalised_data
+    print("Data processing is finished!")
+    return [x_train, y_train, x_test, y_test]
 
 
-# 将预测的结果进行反归一化，获得真实预测结果
-def FNormalise_windows(window, data):
-    normalised_data = []
-    for i in range(len(window)):  # window shape (sequence_length L ,)  即(51L,)
-        normalised_data.append((float(data[i]) + 1) * float(window[i]))
-    return normalised_data
+'''
+    处理验证数据
+'''
 
 
-def predict_all(model, data):
-    predicted = model.predict(data)
-    print('predicted_shape', np.array(predicted).shape)
-    predicted = np.reshape(predicted, (predicted.size,))
-    return predicted
+def load_test_data(path):
+    result = []
+    files = os.listdir(path)
+    for f in files:
+        data = pd.read_csv(path + '/' + f)
+        if 'TimeS' in data:
+            data = data.drop(['TimeS'], axis=1)
+        result.append(data)
+    result = np.array(result)
+    return result
 
 
-x_train, y_train, x_test, y_test, window = load_data(path, 50, True)
+'''
+    模型创建函数
+    使用one-hot编码后这里不能在使用sigmoid，sigmoid输出的是单概率
+    损失函数在使用one-hot编码后也需要更改成categorical_crossentropy
+'''
 
-print('X_train shape:', x_train.shape)
-print('y_train shape:', y_train.shape)
-print('X_test shape:', x_test.shape)
-print('y_test shape:', y_test.shape)
 
-# 创建神经网络
+def create_model(input_shape1, input_shape2):
+    model = Sequential()
+    model.add(LSTM(input_shape=(input_shape1, input_shape2), units=50, return_sequences=True))
+    model.add(Dropout(0.2))
+    model.add(LSTM(input_shape=(None, 50), units=50, return_sequences=True))
+    model.add(Dropout(0.2))
+    model.add(LSTM(input_shape=(None, 50), units=50, return_sequences=True))
+    model.add(Dropout(0.2))
+    model.add(LSTM(50, return_sequences=False))
+    model.add(Dropout(0.2))
+    # 使用one-hot编码后这里不能在使用sigmoid，sigmoid输出的是单概率
+    model.add(Dense(2, activation='softmax'))
+    start = time.time()
+    # 损失函数在使用one-hot编码后也需要更改成categorical_crossentropy
+    model.compile(loss='categorical_crossentropy', optimizer="adam", metrics=['accuracy'])
+    print("Compilation Time : ", time.time() - start)
+    # 查看模型的结构
+    model.summary()
+    return model
 
-# 其中input_shape = (None,1)中的None代表模型输入集的数据量不限制
-# units = 50 代表 代表将输入的维度映射成50个维度输出
-# return_sequences为True意味着返回多个单元短期的输出结果,为False则只返回一个单元的输出结果
-model = Sequential()
-model.add(LSTM(input_shape=(None, 1), units=50, return_sequences=True))
-model.add(Dropout(0.2))
 
-model.add(LSTM(input_shape=(None, 50), units=50, return_sequences=True))
-model.add(Dropout(0.2))
+'''
+    绘图函数
+'''
 
-model.add(LSTM(input_shape=(None, 50), units=50, return_sequences=True))
-model.add(Dropout(0.2))
 
-model.add(LSTM(50, return_sequences=False))
-model.add(Dropout(0.2))
+def draw(history):
+    pyplot.plot(history.history['loss'], label='train')
+    pyplot.plot(history.history['val_loss'], label='test')
+    pyplot.legend()
+    pyplot.xlabel('Epochs', fontsize=12)
+    pyplot.ylabel('Loss', fontsize=12)
+    pyplot.savefig("./images1")
+    pyplot.show()
+    pyplot.plot(history.history['accuracy'], label='train')
+    pyplot.plot(history.history['val_accuracy'], label='test')
+    pyplot.legend()
+    pyplot.xlabel('Epochs', fontsize=12)
+    pyplot.ylabel('Accuracy', fontsize=12)
+    pyplot.savefig("./images2")
+    pyplot.show()
 
-model.add(Dense(units=1))
-model.add(Activation("linear"))
 
-start = time.time()
-model.compile(loss="mse", optimizer="rmsprop")
-print("Compilation Time : ", time.time() - start)
+if __name__ == '__main__':
+    path1 = './故障前1500'
+    path2 = './正常1500'
+    path3 = './验证'
+    model_path = './models/lstm_model_label.h5'
+
+    '''
+    训练时时以下解除注释
+    '''
+    # # 数据处理
+    # X_train, y_train, X_test, y_test = load_data(path1, path2, 1, 0)
+    # print('X_train shape:', X_train.shape)
+    # print('y_train shape:', y_train.shape)
+    # print('X_test shape:', X_test.shape)
+    # print('y_test shape:', y_test.shape)
+    #
+    # # 模型训练
+    # model = create_model(X_train.shape[1], X_train.shape[2])
+    # history = model.fit(X_train, y_train, epochs=15, batch_size=4, validation_data=(X_test, y_test), verbose=2,
+    #                     shuffle=False)
+    # model.save(model_path)
+    # draw(history)
+    #
+    # # 模型评估
+    # score = model.evaluate(X_test, y_test, verbose=2)  # evaluate函数按batch计算在某些输入数据上模型的误差
+    # print('Test accuracy:', score[1])
+    # score = model.evaluate(X_train, y_train, verbose=2)  # evaluate函数按batch计算在某些输入数据上模型的误差
+    # print('Train accuracy:', score[1])
+
+    # 预测验证
+    model = keras.models.load_model(model_path)
+    data = load_test_data(path3)
+    # print(data.shape)
+    predict_x = model.predict(data)
+    classes_x = np.argmax(predict_x, axis=1)
+    print(classes_x)
